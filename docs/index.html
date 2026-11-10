@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>phia - code understanding for Go</title>
+<meta name="description" content="phia reads a Go repository, builds one graph of its symbols, and explains pull requests and codebases top down. This page shows the design the way phia will show code.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23223'/%3E%3Ctext x='16' y='23' font-size='20' text-anchor='middle' fill='%23fff' font-family='Georgia,serif'%3E%CF%86%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f6f4ef; --panel: #fffdf8; --ink: #22252b; --muted: #636a76;
+  --line: #d9d4c8; --accent: #b3402a; --sel: #22252b;
+  --g-model: #c9d6e2; --g-p0: #f1d9a8; --g-p1: #bfdcc4; --g-p2: #f0c0b4;
+  --g-p3: #d3c5e6; --g-rest: #dedbd3; --code: #efece4;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17191d; --panel: #1e2126; --ink: #e6e3dc; --muted: #9aa1ad;
+    --line: #363b44; --accent: #f08a70; --sel: #f3f0e8;
+    --g-model: #34485a; --g-p0: #5e4c22; --g-p1: #2c5136; --g-p2: #6a372c;
+    --g-p3: #47386a; --g-rest: #3a3d44; --code: #262a31;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 17px/1.6 "Atkinson Hyperlegible", system-ui, -apple-system, "Segoe UI", sans-serif;
+  display: flex; flex-direction: column;
+}
+button, select { font: inherit; color: inherit; }
+a { color: var(--accent); }
+header { padding: 12px 20px 10px; border-bottom: 1px solid var(--line); }
+.top { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+.mark { font-size: 30px; font-weight: 700; letter-spacing: .01em; line-height: 1; }
+.mark span { color: var(--accent); }
+.tag { color: var(--muted); }
+.top nav { margin-left: auto; display: flex; gap: 16px; font-size: 15px; }
+.why { margin: 6px 0 8px; max-width: 76ch; font-size: 15px; color: var(--muted); }
+.facts { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 14px; }
+.fact { background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 1px 10px; }
+.fact b { font-size: 15px; }
+.kind { color: var(--muted); font-size: 13px; }
+.bar { flex: 1 1 140px; max-width: 240px; height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+.bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+
+main { flex: 1; min-height: 0; display: grid; grid-template-columns: 290px minmax(320px, 1fr) minmax(380px, 580px); }
+.pane { min-height: 0; overflow: auto; border-right: 1px solid var(--line); }
+.pane:last-child { border-right: 0; }
+.pane > h2 { position: sticky; top: 0; z-index: 2; margin: 0; padding: 8px 14px; font-size: 12px; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--muted); background: var(--bg); border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.pane > h2 select { text-transform: none; letter-spacing: 0; font-size: 13px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 1px 4px; }
+
+#outline ol { list-style: none; margin: 0; padding: 6px 0 20px; }
+#outline li > button { display: block; width: 100%; text-align: left; background: none; border: 0; border-left: 4px solid transparent; padding: 7px 12px 7px 10px; cursor: pointer; }
+#outline li > button:hover { background: var(--panel); }
+#outline li.sel > button { border-left-color: var(--accent); background: var(--panel); }
+#outline .t { font-weight: 700; display: flex; gap: 6px; align-items: baseline; }
+#outline .t .w { margin-left: auto; font-weight: 400; font-size: 12px; color: var(--muted); white-space: nowrap; }
+#outline .s { display: block; font-size: 14px; color: var(--muted); line-height: 1.4; }
+#outline ol ol { padding: 0 0 4px 14px; }
+#outline ol ol .t { font-weight: 400; font-size: 15px; }
+#outline .read .t::before { content: "\2713"; color: var(--accent); font-weight: 700; }
+.sw { width: 10px; height: 10px; border-radius: 2px; flex: none; align-self: center; border: 1px solid var(--line); }
+
+#mapwrap { display: flex; flex-direction: column; overflow: hidden; }
+#map { position: relative; flex: 1; min-height: 300px; margin: 10px; }
+.grp, .box { position: absolute; overflow: hidden; cursor: pointer; }
+.grp { border-radius: 5px; border: 1px solid var(--line); background: var(--panel); }
+.grp > span { display: block; padding: 1px 6px; font-size: 12px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 18px; }
+.box { border-radius: 3px; padding: 2px 5px; font-size: 12.5px; line-height: 1.25; color: var(--ink); }
+.box .q { position: absolute; right: 3px; bottom: 2px; font-size: 11px; font-weight: 700; background: var(--panel); border-radius: 8px; padding: 0 5px; border: 1px solid var(--line); }
+.box.read { opacity: .42; }
+.box.read::after { content: "\2713"; position: absolute; left: 4px; bottom: 1px; font-weight: 700; }
+.grp.sel { outline: 3px solid var(--sel); outline-offset: 0; }
+.box.sel { outline: 3px solid var(--sel); outline-offset: -2px; z-index: 1; }
+.grp.out, .box.out { outline: 3px solid var(--accent); outline-offset: -2px; }
+.grp.in, .box.in { outline: 3px dashed var(--accent); outline-offset: -2px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 0 12px 10px; font-size: 13px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend i { width: 18px; height: 12px; border-radius: 2px; display: inline-block; }
+
+#text { background: var(--panel); }
+#text > h2 { background: var(--panel); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { border: 0; background: none; padding: 1px 9px; font-size: 13px; cursor: pointer; text-transform: none; letter-spacing: 0; }
+.seg button[aria-pressed=true] { background: var(--ink); color: var(--panel); }
+#body { padding: 4px 22px 60px; max-width: 66ch; }
+#body h1 { font-size: 25px; line-height: 1.25; margin: 16px 0 6px; }
+#body h2 { font-size: 22px; margin: 16px 0 6px; }
+#body h3 { font-size: 19px; margin: 26px 0 4px; padding-top: 12px; border-top: 1px solid var(--line); }
+#body p, #body li { margin: 0 0 .7em; }
+#body ul, #body ol { padding-left: 1.3em; }
+#body code { background: var(--code); border-radius: 3px; padding: 0 4px; font-size: .88em; }
+#body pre { background: var(--code); padding: 10px 12px; border-radius: 6px; overflow: auto; font-size: 13.5px; line-height: 1.45; }
+#body pre code { background: none; padding: 0; }
+#body pre.mermaid { background: none; text-align: center; padding: 0; font-family: inherit; }
+.tw { overflow-x: auto; margin: 0 0 1em; }
+#body table { border-collapse: collapse; font-size: 15px; line-height: 1.4; }
+#body th, #body td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; vertical-align: top; }
+#body th { background: var(--code); }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 8px; font-size: 13px; margin: 0 0 12px; align-items: center; }
+.crumb { font-size: 13px; color: var(--muted); margin-top: 14px; }
+.crumb button, .rel button, .kids button { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; text-decoration: underline; text-align: left; }
+#readbtn { border: 1px solid var(--ink); background: none; border-radius: 6px; padding: 1px 10px; cursor: pointer; }
+#readbtn[aria-pressed=true] { background: var(--ink); color: var(--panel); }
+.rel { font-size: 14px; color: var(--muted); margin: 0 0 4px; }
+.kids { list-style: none; padding: 0 !important; }
+.kids li { padding: 6px 0; border-top: 1px solid var(--line); }
+.kids span { display: block; font-size: 14px; color: var(--muted); }
+.hint { font-size: 13px; color: var(--muted); padding: 0 22px 16px; }
+kbd { border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; font: inherit; font-size: 12px; background: var(--bg); }
+.err { padding: 24px; }
+
+@media (max-width: 1080px) {
+  html, body { height: auto; }
+  main { display: block; }
+  .pane { border-right: 0; border-bottom: 1px solid var(--line); overflow: visible; }
+  #map { height: 62vh; flex: none; }
+  #outline ol { max-height: 40vh; overflow: auto; }
+  .pane > h2 { position: static; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <div class="mark">phia<span>.</span></div>
+    <div class="tag">code understanding for Go codebases and PRs</div>
+    <nav>
+      <a href="design.md">design.md</a>
+      <a href="https://github.com/juliaogris/phia">GitHub</a>
+    </nav>
+  </div>
+  <p class="why">This page is phia, Phase 0. No Go code exists, so the design document is the codebase.
+    Sections are symbols, links are edges, and box area is word count. Everything below is computed in the
+    browser from one file, <a href="design.md">design.md</a>.</p>
+  <div class="facts" id="facts"></div>
+</header>
+<main>
+  <section class="pane" id="outline" aria-label="Outline">
+    <h2>Outline <span class="kind">reading order</span></h2>
+    <ol id="ol"></ol>
+  </section>
+  <section class="pane" id="mapwrap" aria-label="Map">
+    <h2>Map
+      <label>area =
+        <select id="area">
+          <option value="words">words</option>
+          <option value="open">open markers</option>
+          <option value="fanin">links in</option>
+        </select>
+      </label>
+    </h2>
+    <div id="map"></div>
+    <div class="legend" id="legend"></div>
+  </section>
+  <section class="pane" id="text" aria-label="Text">
+    <h2>Text
+      <span class="seg" id="fold" role="group" aria-label="Fold level">
+        <button data-l="1">heading</button><button data-l="2">summary</button><button data-l="3">full</button>
+      </span>
+    </h2>
+    <div id="body"></div>
+    <p class="hint"><kbd>j</kbd> <kbd>k</kbd> next and previous section. <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> fold level. <kbd>r</kbd> mark as read.</p>
+  </section>
+</main>
+<script src="vendor/marked.min.js"></script>
+<script src="vendor/d3-hierarchy.min.js"></script>
+<script>
+"use strict";
+const OPEN = /not measured|not tested|to verify|not chosen|not known|not evaluated|not checked|guess(es)?\b|depends on S\d|\|\s*open\s*\|/gi;
+const GROUPS = [
+  [/^Phase 0/, "p0", "Phase 0"], [/^Phase 1/, "p1", "Phase 1"], [/^Phase 2/, "p2", "Phase 2"],
+  [/^Phase 3/, "p3", "Phase 3"], [/^(Idea|Vocabulary|Model)$/, "model", "Idea and model"], [/./, "rest", "Planning"],
+];
+const $ = (s) => document.querySelector(s);
+const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+// slug follows GitHub heading anchors.
+const slug = (t) => t.toLowerCase().replace(/[^\w\- ]/g, "").replace(/ /g, "-");
+const words = (t) => (t.match(/[A-Za-z0-9][\w'./-]*/g) || []).length;
+function hash(t) { let h = 2166136261; for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); }
+const plain = (t) => t.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/[`*]/g, "");
+function firstPara(text) {
+  let fence = false; const out = [];
+  for (const l of text.split("\n")) {
+    if (/^```/.test(l)) { fence = !fence; continue; }
+    if (fence) continue;
+    if (!l.trim()) { if (out.length) break; continue; }
+    if (/^(\||[-*] |\d+\. |#|\s|Contents:)/.test(l)) { if (out.length) break; continue; }
+    out.push(l.trim());
+  }
+  return out.join(" ");
+}
+const firstSentence = (text) => { const p = plain(firstPara(text)); const m = /^(.*?[.?!])(\s|$)/.exec(p); return m ? m[1] : p; };
+
+let doc, nodes = [], units = [], byId = {}, sel = null, level = 2, read = {};
+try { read = JSON.parse(localStorage.getItem("phia.read") || "{}"); } catch (e) { read = {}; }
+const save = () => { try { localStorage.setItem("phia.read", JSON.stringify(read)); } catch (e) { /* storage is optional */ } };
+
+function parse(md) {
+  const root = { title: "phia design", lines: [], kids: [] };
+  let h2 = null, h3 = null, fence = false;
+  for (const line of md.split("\n")) {
+    if (/^```/.test(line)) fence = !fence;
+    const m = !fence && /^(#{1,3}) (.+)$/.exec(line);
+    if (m && m[1] === "#") { root.title = m[2]; continue; }
+    if (m && m[1] === "##") { h2 = { level: 2, title: m[2], lines: [], kids: [] }; root.kids.push(h2); h3 = null; continue; }
+    if (m && h2) { h3 = { level: 3, title: m[2], lines: [], kids: [], parent: h2 }; h2.kids.push(h3); continue; }
+    (h3 || h2 || root).lines.push(line);
+  }
+  for (const a of root.kids) {
+    a.id = slug(a.title); a.own = a.lines.join("\n");
+    a.group = GROUPS.find((g) => g[0].test(a.title))[1];
+    for (const b of a.kids) { b.id = a.id + "/" + slug(b.title); b.own = b.lines.join("\n"); b.group = a.group; }
+    a.text = [a.own, ...a.kids.map((b) => "### " + b.title + "\n" + b.own)].join("\n");
+    for (const b of a.kids) b.text = b.own;
+    nodes.push(a, ...a.kids);
+  }
+  for (const n of nodes) byId[n.id] = n;
+  // A unit is the smallest piece that has its own box, hash and read mark.
+  for (const n of nodes) {
+    if (n.level === 2 && n.kids.length && !words(n.own)) continue;
+    const u = { id: n.level === 2 && n.kids.length ? n.id + "/~" : n.id, node: n, top: n.parent || n,
+      title: n.level === 2 && n.kids.length ? "intro" : n.title, text: n.own };
+    u.words = words(u.text); u.hash = hash(u.text); u.open = (u.text.match(OPEN) || []).length;
+    u.out = new Set();
+    for (const m of u.text.matchAll(/\]\(#([^)]+)\)/g)) { const t = resolve(m[1]); if (t && t !== n) u.out.add(t.id); }
+    units.push(u);
+  }
+  for (const n of nodes) {
+    n.units = units.filter((u) => u.node === n || (n.level === 2 && u.top === n));
+    n.words = n.units.reduce((s, u) => s + u.words, 0);
+    n.open = n.units.reduce((s, u) => s + u.open, 0);
+    n.out = new Set(n.units.flatMap((u) => [...u.out]));
+  }
+  const hits = (n, t) => t === n.id || (n.level === 2 && byId[t].parent === n);
+  for (const n of nodes) n.in = new Set(units.filter((u) => u.node !== n && u.top !== n && [...u.out].some((t) => hits(n, t))).map((u) => u.node.id));
+  for (const u of units) u.fanin = units.filter((o) => o.out.has(u.node.id)).length;
+  // Drop read marks whose section text changed.
+  for (const id of Object.keys(read)) { const u = units.find((x) => x.id === id); if (!u || u.hash !== read[id]) delete read[id]; }
+  save();
+  return root;
+}
+function resolve(s) { return byId[s] || nodes.find((n) => n.level === 3 && slug(n.title) === s) || null; }
+const isRead = (n) => n.units.length > 0 && n.units.every((u) => read[u.id] === u.hash);
+
+function renderFacts() {
+  const total = units.reduce((s, u) => s + u.words, 0);
+  const done = units.filter((u) => read[u.id] === u.hash).reduce((s, u) => s + u.words, 0);
+  const links = units.reduce((s, u) => s + u.out.size, 0), open = units.reduce((s, u) => s + u.open, 0);
+  const pct = total ? Math.round(100 * done / total) : 0;
+  const status = /^Status: ([^.]+\.)/m.exec(doc.lines.join("\n"));
+  $("#facts").innerHTML =
+    `<span class="kind">derived facts</span>` +
+    `<span class="fact"><b>${nodes.length}</b> sections</span><span class="fact"><b>${total}</b> words</span>` +
+    `<span class="fact"><b>${links}</b> links</span><span class="fact"><b>${open}</b> open markers</span>` +
+    `<span class="fact"><b>${pct}%</b> read</span><span class="bar"><i style="width:${pct}%"></i></span>` +
+    (status ? `<span class="kind">${esc(status[1])}</span>` : "");
+}
+
+function renderOutline() {
+  const item = (n) => `<li class="${n === sel ? "sel" : ""} ${isRead(n) ? "read" : ""}"><button data-id="${n.id}">` +
+    `<span class="t">${n.level === 2 ? `<i class="sw" style="background:var(--g-${n.group})"></i>` : ""}${esc(n.title)}<span class="w">${n.words}</span></span>` +
+    (n.level === 2 ? `<span class="s">${esc(firstSentence(n.own))}</span>` : "") + `</button>` +
+    (n.level === 2 && n.kids.length && sel && (sel === n || sel.parent === n) ? `<ol>${n.kids.map(item).join("")}</ol>` : "") + `</li>`;
+  $("#ol").innerHTML = doc.kids.map(item).join("");
+  const cur = $("#ol li.sel > button"); if (cur) cur.scrollIntoView({ block: "nearest" });
+}
+
+function renderMap() {
+  const el = $("#map"), W = el.clientWidth, H = el.clientHeight, by = $("#area").value;
+  if (!W || !H) return;
+  const val = (u) => (by === "words" ? u.words : by === "open" ? u.open : u.fanin) + (by === "words" ? 0 : 0.35);
+  const h = d3.hierarchy({ kids: doc.kids.map((a) => ({ node: a, kids: units.filter((u) => u.top === a) })) }, (d) => d.kids)
+    .sum((d) => (d.kids ? 0 : val(d))).sort((a, b) => b.value - a.value);
+  d3.treemap().size([W, H]).paddingOuter(3).paddingTop((d) => (d.depth === 1 ? 20 : 3)).paddingInner(2).round(true)(h);
+  const outs = sel ? sel.out : new Set(), ins = sel ? sel.in : new Set();
+  const cls = (n) => (n === sel ? " sel" : outs.has(n.id) ? " out" : ins.has(n.id) ? " in" : "");
+  const pos = (d) => `left:${d.x0}px;top:${d.y0}px;width:${d.x1 - d.x0}px;height:${d.y1 - d.y0}px;`;
+  let html = "";
+  for (const g of h.children || []) {
+    const a = g.data.node;
+    html += `<div class="grp${cls(a)}" data-id="${a.id}" style="${pos(g)}" title="${esc(a.title)}"><span>${esc(a.title)}</span></div>`;
+    for (const l of g.children || []) {
+      const u = l.data, w = l.x1 - l.x0, ht = l.y1 - l.y0;
+      html += `<div class="box${u.node.level === 3 ? cls(u.node) : ""}${read[u.id] === u.hash ? " read" : ""}" data-id="${u.node.id}" ` +
+        `style="${pos(l)}background:var(--g-${a.group})" title="${esc(a.title + (u.node.level === 3 ? " / " + u.title : ""))}: ${u.words} words, ${u.open} open markers">` +
+        (w > 46 && ht > 17 ? esc(u.title) : "") + (u.open && w > 26 && ht > 30 ? `<span class="q">?${u.open}</span>` : "") + `</div>`;
+    }
+  }
+  el.innerHTML = html;
+}
+function renderLegend() {
+  const seen = [...new Set(doc.kids.map((a) => a.group))];
+  $("#legend").innerHTML = GROUPS.filter((g) => seen.includes(g[1])).map((g) => `<span><i style="background:var(--g-${g[1]})"></i>${g[2]}</span>`).join("") +
+    `<span><i style="outline:3px solid var(--sel);outline-offset:-3px"></i>selected</span>` +
+    `<span><i style="outline:3px solid var(--accent);outline-offset:-3px"></i>it links to</span>` +
+    `<span><i style="outline:3px dashed var(--accent);outline-offset:-3px"></i>links to it</span>` +
+    `<span><b>?n</b> open markers</span><span><b>&#10003;</b> read</span>`;
+}
+
+let mermaidLoading = null;
+function drawDiagrams() {
+  const pres = document.querySelectorAll("#body pre.mermaid"); if (!pres.length) return;
+  mermaidLoading = mermaidLoading || new Promise((ok, no) => { const s = document.createElement("script"); s.src = "vendor/mermaid.min.js"; s.onload = ok; s.onerror = no; document.head.appendChild(s); });
+  mermaidLoading.then(() => {
+    const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+    mermaid.initialize({ startOnLoad: false, theme: dark ? "dark" : "neutral", fontFamily: "inherit" });
+    mermaid.run({ nodes: document.querySelectorAll("#body pre.mermaid:not([data-processed])") });
+  }).catch(() => {});
+}
+marked.use({ renderer: { code(code, lang) { return lang === "mermaid" ? `<pre class="mermaid">${esc(code)}</pre>` : false; } } });
+
+function renderText() {
+  for (const b of document.querySelectorAll("#fold button")) b.setAttribute("aria-pressed", String(+b.dataset.l === level));
+  if (!sel) { $("#body").innerHTML = ""; return; }
+  const n = sel, link = (id) => `<button data-id="${id}">${esc((byId[id].parent ? byId[id].parent.title + " / " : "") + byId[id].title)}</button>`;
+  let h = n.parent ? `<div class="crumb"><button data-id="${n.parent.id}">${esc(n.parent.title)}</button> /</div>` : `<div class="crumb">&nbsp;</div>`;
+  h += `<h1>${esc(n.title)}</h1><div class="meta">` +
+    `<button id="readbtn" aria-pressed="${isRead(n)}">${isRead(n) ? "&#10003; read" : "mark as read"}</button>` +
+    `<span class="fact"><b>${n.words}</b> words</span><span class="fact"><b>${n.open}</b> open markers</span>` +
+    `<span class="fact"><b>${n.out.size}</b> links out</span><span class="fact"><b>${n.in.size}</b> links in</span></div>`;
+  if (n.out.size) h += `<p class="rel">Links to: ${[...n.out].map(link).join(", ")}</p>`;
+  if (n.in.size) h += `<p class="rel">Linked from: ${[...n.in].map(link).join(", ")}</p>`;
+  if (level === 2) {
+    h += marked.parse(firstPara(n.own) || "");
+    if (n.kids.length) h += `<ul class="kids">` + n.kids.map((k) => `<li><button data-id="${k.id}">${esc(k.title)}</button><span>${esc(firstSentence(k.own))}</span></li>`).join("") + `</ul>`;
+  }
+  if (level === 3) h += marked.parse(n.text).replace(/<table>/g, '<div class="tw"><table>').replace(/<\/table>/g, "</table></div>");
+  $("#body").innerHTML = h; $("#text").scrollTop = 0;
+  drawDiagrams();
+}
+
+function render() { renderFacts(); renderOutline(); renderMap(); renderText(); }
+function select(n, push) {
+  if (!n) return; sel = n;
+  if (push !== false) history.replaceState(null, "", "#" + n.id);
+  render();
+}
+function toggleRead() {
+  if (!sel) return; const on = !isRead(sel);
+  for (const u of sel.units) { if (on) read[u.id] = u.hash; else delete read[u.id]; }
+  save(); render();
+}
+function step(d) { const i = nodes.indexOf(sel); select(nodes[Math.max(0, Math.min(nodes.length - 1, i + d))]); }
+
+document.addEventListener("click", (e) => {
+  const a = e.target.closest('#body a[href^="#"]');
+  if (a) { const t = resolve(a.getAttribute("href").slice(1)); if (t) { e.preventDefault(); select(t); } return; }
+  if (e.target.closest("#readbtn")) return toggleRead();
+  const f = e.target.closest("#fold button"); if (f) { level = +f.dataset.l; return renderText(); }
+  const t = e.target.closest("[data-id]"); if (t && byId[t.dataset.id]) select(byId[t.dataset.id]);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey || /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+  if (e.key === "j") step(1); else if (e.key === "k") step(-1); else if (e.key === "r") toggleRead();
+  else if (/^[123]$/.test(e.key)) { level = +e.key; renderText(); }
+});
+$("#area").addEventListener("change", renderMap);
+addEventListener("resize", renderMap);
+addEventListener("hashchange", () => { const t = byId[decodeURIComponent(location.hash.slice(1))]; if (t && t !== sel) select(t, false); });
+
+fetch("design.md").then((r) => { if (!r.ok) throw new Error(r.status); return r.text(); }).then((md) => {
+  doc = parse(md); renderLegend();
+  select(byId[decodeURIComponent(location.hash.slice(1))] || nodes[0], false);
+}).catch((e) => {
+  $("main").innerHTML = `<p class="err">The page could not load <a href="design.md">design.md</a> (${esc(String(e.message))}). The design is also on <a href="https://github.com/juliaogris/phia/blob/main/docs/design.md">GitHub</a>.</p>`;
+});
+</script>
+</body>
+</html>
